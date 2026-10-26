@@ -1,0 +1,422 @@
+'use client'
+
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { captureStates, StateRow, type StateSnapshot } from './sheet-states'
+import { useSheetPlayback } from './sheet-playback'
+import styles from './spec.module.css'
+
+// The parts every spec sheet shares: the page (title, figure 1, moments, notes, specification, figure 2, foot), the
+// driver that holds a component's real CSS transitions at a moment and glides between moments, and the drawing
+// vocabulary (dimensions, callouts, the curve, the timeline). A sheet supplies only its component and what to draw.
+
+export const r1 = (n: number) => Number(n.toFixed(1))
+
+// The iOS 26 system colours (light). Each spec takes its own: the swatch on lines, fills and marks, a tint of it
+// under the run, and a darker ink of the same hue for words, so even yellow and mint read on white.
+export const IOS26 = {
+  red: '#FF383C', orange: '#FF8D28', yellow: '#FFCC00', green: '#34C759', mint: '#00C8B3', teal: '#00C3D0',
+  cyan: '#00C0E8', blue: '#0088FF', indigo: '#6155F5', purple: '#CB30E0', pink: '#FF2D55', brown: '#AC7F5E',
+} as const
+export type Swatch = keyof typeof IOS26
+// Which spec has which swatch. A new spec takes one nobody has; once all twelve are in use, the least-used one.
+// Breaking that (a repeat while a swatch is unused, or one swatch two uses ahead of another) is an error.
+export const SPEC_ACCENTS: Record<string, Swatch> = {
+  // one line per poster in this project (the example's below: drop it with the example)
+  copy: 'purple',
+}
+if (process.env.NODE_ENV !== 'production') {
+  const count = (s: Swatch) => Object.values(SPEC_ACCENTS).filter((v) => v === s).length
+  const counts = (Object.keys(IOS26) as Swatch[]).map(count)
+  if (Math.max(...counts) - Math.min(...counts) > 1) throw new Error('Accents must stay even: give a new spec the least-used swatch')
+}
+// (the ink is darkened on light paper and lifted on dark, so accent words keep their contrast either way)
+const accentVars = (spec: string, dark: boolean) => {
+  if (!SPEC_ACCENTS[spec]) throw new Error(`Give "${spec}" a swatch in SPEC_ACCENTS: the least-used one`)
+  const c = IOS26[SPEC_ACCENTS[spec]]
+  return {
+    '--accent': c,
+    '--accent-tint': `color-mix(in oklch, ${c} ${dark ? 22 : 12}%, var(--paper))`,
+    '--accent-ink': dark ? `oklch(from ${c} max(l, 0.74) c h)` : `oklch(from ${c} min(l, 0.52) c h)`,
+  } as React.CSSProperties
+}
+
+// The poster follows the app's own theme, passed in: dark only when the app itself is dark. Once the new colours
+// have painted, the moments are captured again in them (they're copies, not live).
+function useThemeRefresh(dark: boolean) {
+  const first = useRef(true)
+  useEffect(() => {
+    if (first.current) { first.current = false; return }
+    const id = requestAnimationFrame(() => requestAnimationFrame(() => window.dispatchEvent(new Event('spec-theme'))))
+    return () => cancelAnimationFrame(id)
+  }, [dark])
+}
+
+// (CSS's keyword easings, as the curves they stand for)
+const KEYWORDS: Record<string, string> = { ease: 'cubic-bezier(0.25, 0.1, 0.25, 1)', 'ease-in': 'cubic-bezier(0.42, 0, 1, 1)', 'ease-out': 'cubic-bezier(0, 0, 0.58, 1)', 'ease-in-out': 'cubic-bezier(0.42, 0, 0.58, 1)' }
+export function easeAt(time: number, easing: string) {
+  easing = KEYWORDS[easing.trim()] ?? easing
+  const values = easing.match(/cubic-bezier\(([^)]+)\)/)?.[1].split(',').map(Number)
+  if (!values || values.length !== 4) return time
+  const [x1, y1, x2, y2] = values
+  const coordinate = (t: number, a: number, b: number) => 3 * (1 - t) ** 2 * t * a + 3 * (1 - t) * t ** 2 * b + t ** 3
+  let low = 0, high = 1
+  for (let i = 0; i < 40; i++) {
+    const middle = (low + high) / 2
+    if (coordinate(middle, x1, x2) < time) low = middle
+    else high = middle
+  }
+  return coordinate((low + high) / 2, y1, y2)
+}
+export const easeWords = (easing: string) => {
+  if (KEYWORDS[easing.trim()]) return `${easing.trim()[0].toUpperCase()}${easing.trim().slice(1)} (${KEYWORDS[easing.trim()].match(/\(([^)]+)\)/)![1]})`
+  const v = easing.match(/\(([^)]+)\)/)?.[1].split(',').map(Number).join(', ')
+  return v ? `Ease-out (${v})` : easing
+}
+
+// A keyframed animation's own stops (offset, value, the easing into the next), read off the running animation, and
+// its value at any fraction of its run: for overshoots, which no single easing curve describes.
+export type Stop = { at: number; v: number; easing: string }
+export function stopsOf(a: Animation, value: (k: ComputedKeyframe) => number): Stop[] {
+  return (a.effect as KeyframeEffect).getKeyframes().map((k) => ({ at: Number(k.computedOffset), v: value(k), easing: String(k.easing ?? 'linear') }))
+}
+export function sampleStops(stops: Stop[], f: number) {
+  const t = Math.max(0, Math.min(1, f))
+  for (let i = 0; i < stops.length - 1; i++) {
+    const a = stops[i], b = stops[i + 1]
+    if (t <= b.at) return a.v + (b.v - a.v) * easeAt(b.at === a.at ? 1 : (t - a.at) / (b.at - a.at), a.easing)
+  }
+  return stops[stops.length - 1].v
+}
+export const scaleOf = (k: ComputedKeyframe) => parseFloat(String(k.transform).match(/scale\(([^)]+)\)/)?.[1] ?? '1')
+
+// a number with its unit set lighter, so the eye lands on the value (HTML and SVG)
+export const U = ({ v, u }: { v: ReactNode; u: string }) => <>{v}<span className={styles.unit}>{u}</span></>
+export const Ut = ({ v, u }: { v: ReactNode; u: string }) => <>{v}<tspan className={styles.unit}>{u}</tspan></>
+
+// the drawing's scale on the poster: fixed, since the whole poster scales with the window instead
+export function useDrawingScale(base = 2) {
+  return base
+}
+
+// The poster's scale: A4 portrait (794 × 1123), as large as the space allows: the stage's width, and the window's
+// height below wherever the stage starts (under the app's own header or nav, whatever its height)
+export const A4 = { w: 794, h: 1123 }
+function usePosterScale(stage: React.RefObject<HTMLElement | null>) {
+  const [k, setK] = useState(0.6)
+  useLayoutEffect(() => {
+    const el = stage.current
+    if (!el) return
+    const fit = () => {
+      const top = el.getBoundingClientRect().top + window.scrollY
+      setK(Math.max(0.1, Math.min((el.clientWidth - 42) / A4.w, (window.innerHeight - top - 42) / A4.h)))
+    }
+    fit()
+    // (the stage's width, and anything above it changing height, both refit it)
+    const ro = new ResizeObserver(fit)
+    ro.observe(el); ro.observe(document.body)
+    window.addEventListener('resize', fit)
+    return () => { window.removeEventListener('resize', fit); ro.disconnect() }
+  }, [stage])
+  return k
+}
+
+// Crisp hairlines: a 1px line drawn on a device pixel's centre, not across two. The drawing may be scaled (the
+// poster is), so its own units are taken to screen pixels and back.
+export type Snap = (v: number, axis: 'x' | 'y') => number
+export function useCrisp() {
+  const ref = useRef<SVGSVGElement>(null)
+  const [o, setO] = useState({ x: 0, y: 0, d: 1, k: 1 })
+  useLayoutEffect(() => {
+    const svg = ref.current
+    const r = svg?.getBoundingClientRect()
+    if (!svg || !r) return
+    const d = window.devicePixelRatio || 1
+    // (the poster's scale: drawings are drawn 1:1 inside it)
+    const poster = svg.closest<HTMLElement>('[data-poster]')
+    const k = poster ? poster.getBoundingClientRect().width / poster.offsetWidth : 1
+    setO((p) => (p.x === r.left && p.y === r.top && p.d === d && p.k === k ? p : { x: r.left, y: r.top, d, k }))
+  })
+  const snap: Snap = (v, axis) => {
+    const at = axis === 'x' ? o.x : o.y
+    const device = Math.round((at + v * o.k) * o.d - 0.5) + 0.5
+    return (device / o.d - at) / o.k
+  }
+  return { ref, snap }
+}
+
+// A horizontal dimension: extension lines off both measured points, a line between with a slash at each end, the
+// size above or below it.
+export function Dim({ x1: a, x2: b, y: c, from, label, below = false, snap, part = 'n2' }: { x1: number; x2: number; y: number; from: number; label: ReactNode; below?: boolean; snap: Snap; part?: string }) {
+  const x1 = snap(a, 'x'), x2 = snap(b, 'x'), y = snap(c, 'y')
+  const s = (x: number) => `M${x - 3} ${y + 3}L${x + 3} ${y - 3}`
+  const gap = below ? 3 : -3
+  return <g className={styles.dim} data-part={part}>
+    <path d={`M${x1} ${from + gap}V${y + (below ? 5 : -5)}M${x2} ${from + gap}V${y + (below ? 5 : -5)}`} className={styles.extension} />
+    <line x1={x1} x2={x2} y1={y} y2={y} />
+    <path d={s(x1) + s(x2)} />
+    <text x={(x1 + x2) / 2} y={below ? y + 16 : y - 8} textAnchor="middle">{label}</text>
+  </g>
+}
+
+// A vertical dimension, the same parts turned upright, the size beside it (left of the line when `left`).
+export function VDim({ y1: a, y2: b, x: c, from, label, left = false, snap, part = 'n2' }: { y1: number; y2: number; x: number; from: number; label: ReactNode; left?: boolean; snap: Snap; part?: string }) {
+  const y1 = snap(a, 'y'), y2 = snap(b, 'y'), x = snap(c, 'x')
+  const s = (y: number) => `M${x - 3} ${y + 3}L${x + 3} ${y - 3}`
+  const gap = left ? -3 : 3
+  return <g className={styles.dim} data-part={part}>
+    <path d={`M${from + gap} ${y1}H${x + (left ? -5 : 5)}M${from + gap} ${y2}H${x + (left ? -5 : 5)}`} className={styles.extension} />
+    <line x1={x} x2={x} y1={y1} y2={y2} />
+    <path d={s(y1) + s(y2)} />
+    <text x={left ? x - 8 : x + 8} y={(y1 + y2) / 2 + 4} textAnchor={left ? 'end' : 'start'}>{label}</text>
+  </g>
+}
+
+// a superellipse (n = 4) of radius r round x, y: the same squircle as the notes' numbers
+export function squircle(x: number, y: number, r: number) {
+  return Array.from({ length: 48 }, (_, i) => {
+    const t = (i / 48) * Math.PI * 2, c = Math.cos(t), s = Math.sin(t)
+    return `${i ? 'L' : 'M'}${x + r * Math.sign(c) * Math.abs(c) ** 0.5} ${y + r * Math.sign(s) * Math.abs(s) ** 0.5}`
+  }).join('') + 'Z'
+}
+
+// A numbered callout. Every leader leaves its part at 45°, `len` along each axis, in the direction given, so the
+// leaders on a sheet read as one set; or straight across ('e', 'w') where a gap between parts is the only clear way.
+export type Dir = 'ne' | 'se' | 'sw' | 'nw' | 'e' | 'w'
+export function Callout({ n, x, y, dir, len = 34 }: { n: number; x: number; y: number; dir: Dir; len?: number }) {
+  const tx = x + (dir.includes('e') ? len : -len), ty = y + (dir.length === 1 ? 0 : dir.includes('s') ? len : -len)
+  return <g className={styles.callout} data-part={`n${n}`}>
+    <line x1={x} y1={y} x2={tx} y2={ty} />
+    <circle cx={x} cy={y} r={2.25} className={styles.point} />
+    <path d={squircle(tx, ty, 10.5)} className={styles.badge} />
+    <text x={tx} y={ty + 3.5} textAnchor="middle">{n}</text>
+  </g>
+}
+
+// The overlay that sits on figure 1: same origin and scale as the component under it.
+export function Overlay({ w, h, children, svgRef }: { w: number; h: number; children: ReactNode; svgRef?: React.Ref<SVGSVGElement> }) {
+  return <svg ref={svgRef} className={styles.overlay} width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true">{children}</svg>
+}
+export const markClass = { ghost: styles.ghost, reference: styles.reference, mark: styles.mark2, underline: styles.mark1, hlOnly: styles.hlOnly, show1: styles.show1, show2: styles.show2, hatch: styles.hatch }
+
+// Figure 2: one or more curves over x (time, or scroll), the first one carrying the current point and its value.
+export type Series = { f: (x: number) => number; className?: string }
+export function Curve({ x, max, series, end, unit = '', label, marks = [] }: { x: number; max: number; series: Series[]; end: ReactNode; unit?: string; label?: ReactNode; marks?: number[] }) {
+  // (drawn at its column's own width, 1:1, so it fills the column and its words stay 12px)
+  const svg = useRef<SVGSVGElement>(null)
+  const [cw, setCw] = useState(229)
+  useLayoutEffect(() => {
+    const w = svg.current?.parentElement?.clientWidth
+    if (w && Math.abs(w - cw) > 0.5) setCw(w)
+  })
+  const L = 21, T = 8, W = cw - L - 8, H = 117
+  const X = (v: number) => L + (W * v) / max, Y = (k: number) => T + H * (1 - k)
+  const path = (f: (v: number) => number) => Array.from({ length: 81 }, (_, i) => `${i ? 'L' : 'M'}${X((max * i) / 80)} ${Y(f((max * i) / 80))}`).join('')
+  const k = series[0].f(x)
+  // (high on a lone curve, the value goes above and left of the point; with a second series up there, it stays below)
+  const high = k > 0.8 && series.length === 1
+  const cx = X(x), cy = Y(k)
+  return (
+    <svg ref={svg} className={styles.curve} viewBox={`0 0 ${L + W + 8} ${T + H + 21}`} role="img" aria-label={`${r1(x)} of ${max}${unit}, ${Math.round(k * 100)} percent.`}>
+      <path d={`M${L} ${T}V${T + H}H${L + W}`} className={styles.axis} />
+      <line x1={L} y1={T + H} x2={L + W} y2={T} className={styles.referenceLine} />
+      {series.slice(1).map((s, i) => <path key={i} d={path(s.f)} className={s.className ?? styles.ease} />)}
+      <path d={path(series[0].f)} className={series[0].className ?? styles.ease} />
+      {marks.map((v) => <circle key={v} cx={X(v)} cy={Y(series[0].f(v))} r={2.5} className={styles.mark} />)}
+      <path d={`M${L} ${cy}H${cx}V${T + H}`} className={styles.guide} />
+      <circle cx={cx} cy={cy} r={3.5} className={styles.dot} />
+      <text x={L - 8} y={T + 4} textAnchor="end">1</text>
+      <text x={L - 8} y={T + H + 4} textAnchor="end">0</text>
+      <text x={high ? cx - 8 : cx + 8} y={high ? cy - 8 : cy + 15} textAnchor={high ? 'end' : 'start'} className={styles.accentText}>{label ?? <Ut v={Math.round(k * 100)} u="%" />}</text>
+      <text x={cx} y={T + H + 17} textAnchor="middle" className={styles.accentText}>{r1(x)}</text>
+      {Math.abs(cx - (L + W)) > 55 && <text x={L + W} y={T + H + 17} textAnchor="end">{end}</text>}
+    </svg>
+  )
+}
+
+// The moments row: the frames, then the run as a band under them, each frame's leader landing on it at its moment.
+const COL = 144, GAP = 34, ROW = COL * 3 + GAP * 2
+const centre = (i: number) => i * (COL + GAP) + COL / 2
+export function Timeline({ value, max, f, marks, selected, label }: { value: number; max: number; f: (v: number) => number; marks: number[]; selected: number; label: ReactNode }) {
+  const X = (v: number) => 1 + (v / max) * (ROW - 2)
+  const base = 55, rise = 34
+  const Y = (v: number) => base - rise * f(Math.max(0, Math.min(max, v)))
+  const curve = (end: number) => Array.from({ length: 61 }, (_, i) => { const v = (end * i) / 60; return `${i ? 'L' : 'M'}${X(v)} ${Y(v)}` }).join('')
+  const { ref, snap } = useCrisp()
+  const by = snap(base, 'y')
+  const step = max / 10
+  return (
+    <svg ref={ref} data-part="n2 curve" className={styles.timeline} viewBox={`0 0 ${ROW} 76`} role="img" aria-label={`At ${r1(value)} of ${max}.`}>
+      <path d={`${curve(max)}V${base}H${X(0)}Z`} className={styles.band} />
+      <path d={`${curve(value)}V${base}H${X(0)}Z`} className={styles.bandOn} />
+      <path d={curve(max)} className={styles.track} fill="none" />
+      <path d={curve(value)} className={styles.progress} fill="none" />
+      {marks.map((v, i) => <path key={i} d={`M${centre(i)} 0V8L${X(v)} ${Y(v) - 5}`} className={i === selected ? styles.leaderOn : styles.leader} />)}
+      <line x1={0} x2={ROW} y1={by} y2={by} className={styles.track} />
+      {Array.from({ length: 11 }, (_, k) => <line key={k} x1={snap(X(k * step), 'x')} x2={snap(X(k * step), 'x')} y1={by} y2={by + (k % 2 ? 3 : 5)} className={styles.track} />)}
+      {marks.map((v, i) => <circle key={i} cx={X(v)} cy={Y(v)} r={3} className={i === selected ? styles.markOn : styles.mark} />)}
+      <line x1={X(value)} x2={X(value)} y1={Y(value)} y2={base} className={styles.playhead} />
+      <circle cx={X(value)} cy={base} r={2.5} className={styles.dot} />
+      <text x={X(value)} y={base + 18} textAnchor={value > max * 0.9 ? 'end' : value < max * 0.06 ? 'start' : 'middle'} className={styles.accentText}>{label}</text>
+    </svg>
+  )
+}
+
+// (crop: the part of the component that changes, in its own px; each frame shows only that, its cut edges faded)
+export type Crop = { x: number; y: number; w: number; h: number }
+const cropTo = (s: StateSnapshot, c: Crop, fade: string): StateSnapshot => ({
+  ...s, width: c.w, height: c.h,
+  html: `<div style="position:relative;width:${c.w}px;height:${c.h}px;overflow:hidden;mask-image:${fade}"><div style="position:absolute;left:${s.left - c.x}px;top:${s.top - c.y}px">${s.html}</div></div>`,
+})
+export function Moments({ snapshots, labels, selected, onSelect, timeline, height = 55, crop }: { snapshots: StateSnapshot[]; labels: readonly string[]; selected: number; onSelect: (i: number) => void; timeline: ReactNode; height?: number; crop?: Crop }) {
+  const fade = 'linear-gradient(transparent, #000 13px, #000 calc(100% - 13px), transparent)'
+  const shown = crop ? snapshots.map((s) => cropTo(s, crop, fade)) : snapshots
+  return <div className={styles.moments} style={{ ['--thumb-h' as string]: `${height}px` }}>
+    <StateRow compact bare images={shown} labels={labels} selected={selected} onSelect={onSelect} />
+    {timeline}
+  </div>
+}
+
+// The driver for a component animated by CSS transitions. `setup` puts the component at its start with no
+// transition and returns what to measure, the change to make (the component's own handler), and how to read it
+// while it runs. The real transitions are then paused at each moment, captured for the row, and held at the
+// telling one; picking a moment glides the real animations there.
+export type Held<B, R> = B & R & { elapsed: number; duration: number; easing: string; reduced: boolean }
+// (pick: which of the running animations are the interaction, when others, a button's hover say, run beside it)
+export type Setup<B, R> = { base: B | (() => B); easing: string; trigger: () => void | Promise<void>; read: () => R; pick?: (all: Animation[]) => Animation[] }
+
+// a box's left, top and size inside a root, in the root's own px, whatever the drawing's and the poster's scale
+export const within = (root: HTMLElement, el: Element) => {
+  const r = root.getBoundingClientRect(), b = el.getBoundingClientRect(), k = r.width / root.offsetWidth
+  // (to 0.1px: measuring through a zoom leaves float dust, 219.99997 for 220)
+  const t = (v: number) => Math.round(v * 10) / 10
+  return { x: t((b.left - r.left) / k), y: t((b.top - r.top) / k), w: t(b.width / k), h: t(b.height / k) }
+}
+export function useTransitionSpec<B extends object, R extends object>({ fractions, setup }: {
+  fractions: readonly number[]
+  // (setup may wait, and base may be read after the trigger, for a component whose parts only exist once it's shown)
+  setup: (root: HTMLElement) => Setup<B, R> | Promise<Setup<B, R>>
+}) {
+  const root = useRef<HTMLDivElement>(null)
+  const [m, setM] = useState<Held<B, R> | null>(null)
+  const [ready, setReady] = useState(false)
+  const [error, setError] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+  const [selected, setSelected] = useState(1)
+  const [snapshots, setSnapshots] = useState<StateSnapshot[]>([])
+  const playback = useSheetPlayback(ready, m?.reduced, fractions[1])
+  const keep = useRef(setup)
+  keep.current = setup
+
+  useEffect(() => {
+    let alive = true, generation = 0
+    const frames = new Set<number>()
+    const frame = () => new Promise<void>((resolve) => { const id = requestAnimationFrame(() => { frames.delete(id); resolve() }); frames.add(id) })
+    const r = root.current!
+    const prepare = async () => {
+      const g = ++generation
+      setReady(false); setError(false)
+      try {
+        await document.fonts.ready
+        await frame()
+        if (!alive || g !== generation) return
+        r.getAnimations({ subtree: true }).forEach((a) => a.cancel())
+        const s = await keep.current(r)
+        if (!alive || g !== generation) return
+        void getComputedStyle(r).opacity
+        const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches
+        await s.trigger()
+        if (!alive || g !== generation) return
+        void getComputedStyle(r).opacity
+        const base = typeof s.base === 'function' ? (s.base as () => B)() : s.base
+        const all = r.getAnimations({ subtree: true })
+        const animations = s.pick ? s.pick(all) : all
+        if (!reduced && !animations.length) throw new Error('No transitions ran')
+        // (a looping animation's end is infinite: its one cycle is the run)
+        const end = (a: Animation) => { const t = a.effect!.getComputedTiming(); return Number.isFinite(Number(t.endTime)) ? Number(t.endTime) : Number(t.delay ?? 0) + Number(t.duration) }
+        const duration = reduced ? 0 : Math.round(Math.max(...animations.map(end)))
+        const elapsed = reduced ? 0 : duration * playback.fraction.current
+        const captured = reduced ? [] : captureStates(r, animations, duration, fractions)
+        animations.forEach((a) => { a.pause(); a.currentTime = elapsed })
+        const held = (t: number) => ({ ...base, ...s.read(), elapsed: Math.round(t), duration, easing: s.easing, reduced })
+        const first = held(elapsed)
+        await frame()
+        if (!alive || g !== generation) return
+        playback.timeline.current = { root: r, animations, duration, read: (t) => setM(held(t)) }
+        setSnapshots(captured); setM(first); setReady(true)
+      } catch {
+        if (alive && g === generation) setError(true)
+      }
+    }
+    void prepare()
+    const motion = matchMedia('(prefers-reduced-motion: reduce)')
+    const refresh = () => { void prepare() }
+    motion.addEventListener('change', refresh)
+    window.addEventListener('spec-theme', refresh)
+    return () => {
+      alive = false; generation++
+      frames.forEach(cancelAnimationFrame)
+      r.getAnimations({ subtree: true }).forEach((a) => a.cancel())
+      motion.removeEventListener('change', refresh)
+      window.removeEventListener('spec-theme', refresh)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attempt])
+
+  const select = (i: number) => { setSelected(i); playback.glideTo(fractions[i]) }
+  return { root, m, ready, error, retry: () => setAttempt((v) => v + 1), snapshots, selected, select, glideTo: playback.glideTo }
+}
+
+export type Note = { part: 'n1' | 'n2'; head: string; body: ReactNode }
+export type Row = readonly [string, ReactNode, string]
+
+// The page. `hl` (what's pointed at in the notes or the specification) dims everything tagged with another part.
+export function SpecPage({ accent, label, name, ready, error, onRetry, drawing, moments, notes, spec, fig2, units, theme = 'light' }: {
+  theme?: 'light' | 'dark'
+  accent: string; label: string; name: string; ready: boolean; error: boolean; onRetry: () => void
+  drawing: ReactNode; moments?: ReactNode; notes: Note[]; spec: readonly Row[]
+  fig2?: { node: ReactNode }; units: ReactNode
+}) {
+  const [hl, setHl] = useState<string | null>(null)
+  const point = (part: string) => ({ 'data-part': part, onMouseEnter: () => setHl(part === 'none' ? null : part), onMouseLeave: () => setHl(null) })
+  const stage = useRef<HTMLDivElement>(null)
+  const k = usePosterScale(stage)
+  const dark = theme === 'dark'
+  useThemeRefresh(dark)
+  return (
+    <main className={styles.page} data-theme={theme} data-interface-bts aria-label={label} aria-busy={!ready && !error}>
+      {error && <div className={styles.error} role="alert"><p>The breakdown couldn&apos;t load.</p><button onClick={onRetry}>Try again</button></div>}
+      <div ref={stage} className={styles.stage}>
+      {/* (the poster's footprint at its scale, so the page lays out round what's drawn) */}
+      <div style={{ width: A4.w * k, height: A4.h * k }}>
+      <div className={styles.sheet} data-poster data-hl={hl ?? undefined} style={{ ...accentVars(accent, dark), transform: `scale(${k})`, visibility: ready ? 'visible' : 'hidden' }}>
+        <header className={styles.title}>
+          <h1>{name}</h1>
+        </header>
+
+        <figure className={styles.figure}>
+          <div className={styles.drawing}>{drawing}</div>
+          {moments}
+        </figure>
+
+        <div className={styles.foot}>
+          <section className={styles.notes} aria-label="Notes">
+            {notes.map((n, i) => <div key={i} className={styles.note} {...point(n.part)}><span className={styles.number}>{i + 1}</span><p><span>{n.head}</span> {n.body}</p></div>)}
+          </section>
+          <section className={styles.spec} aria-label="Specification">
+            {[spec.slice(0, Math.ceil(spec.length / 2)), spec.slice(Math.ceil(spec.length / 2))].map((half, i) => <dl key={i}>{half.map(([k, v, part]) => <div key={k} className={styles.row} {...point(part)}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>)}
+          </section>
+          {fig2 && <figure className={styles.curveFigure} {...point('curve')}>
+            {fig2.node}
+          </figure>}
+        </div>
+
+        <footer className={styles.titleBlock} aria-label="Drawing details">
+          <span>{units}</span>
+          <span className={styles.lines}><i className={styles.lineNow} />Now<i className={styles.lineGhost} />Start<i className={styles.lineRef} />Target</span>
+        </footer>
+      </div>
+      </div>
+      </div>
+    </main>
+  )
+}
