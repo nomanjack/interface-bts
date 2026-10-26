@@ -67,6 +67,10 @@ export function easeAt(time: number, easing: string) {
   }
   return coordinate((low + high) / 2, y1, y2)
 }
+// The first timing function in a computed list ("cubic-bezier(0.22, 1, 0.36, 1), ease"). Splitting on commas cuts a
+// cubic-bezier() in half and every curve drawn from it comes out wrong.
+export const firstEasing = (v: string) => v.match(/cubic-bezier\([^)]*\)|steps\([^)]*\)|linear\([^)]*\)|[a-z-]+/)?.[0] ?? 'ease'
+
 export const easeWords = (easing: string) => {
   if (KEYWORDS[easing.trim()]) return `${easing.trim()[0].toUpperCase()}${easing.trim().slice(1)} (${KEYWORDS[easing.trim()].match(/\(([^)]+)\)/)![1]})`
   const v = easing.match(/\(([^)]+)\)/)?.[1].split(',').map(Number).join(', ')
@@ -96,6 +100,30 @@ export const Ut = ({ v, u }: { v: ReactNode; u: string }) => <>{v}<tspan classNa
 // the drawing's scale on the poster: fixed, since the whole poster scales with the window instead
 export function useDrawingScale(base = 2) {
   return base
+}
+
+// The drawing scale that puts a component at screen scale 1, whatever the poster's own scale: for a component that
+// measures itself on screen (getBoundingClientRect) and compares that with its own px, as a drag threshold or a
+// swipe distance does. Scaled by the poster, the two disagree and its decisions move; at screen scale 1 they don't.
+// Pass any element inside the poster.
+export function useScreenScale(inside: React.RefObject<HTMLElement | null>) {
+  const [z, setZ] = useState(1)
+  useLayoutEffect(() => {
+    const read = () => { const p = inside.current?.closest<HTMLElement>('[data-poster]'); if (p) setZ(p.offsetWidth / p.getBoundingClientRect().width) }
+    read()
+    const ro = new ResizeObserver(read); ro.observe(document.body)
+    window.addEventListener('resize', read)
+    return () => { ro.disconnect(); window.removeEventListener('resize', read) }
+  }, [inside])
+  return z
+}
+
+// Moments captured one at a time (by a custom driver, each after its own run) put in one camera, as captureEach
+// does for a row it takes in one go: each copy re-placed in the union of their frames, so growth reads as growth.
+export function oneCamera(shots: StateSnapshot[]): StateSnapshot[] {
+  const L = Math.min(...shots.map((s) => s.left)), T = Math.min(...shots.map((s) => s.top))
+  const W = Math.max(...shots.map((s) => s.left + s.width)) - L, H = Math.max(...shots.map((s) => s.top + s.height)) - T
+  return shots.map((s) => ({ ...s, left: L, top: T, width: W, height: H, html: `<div style="position:absolute;left:${s.left - L}px;top:${s.top - T}px">${s.html}</div>` }))
 }
 
 // The poster's scale: A4 portrait (794 × 1123), as large as the space allows: the stage's width, and the window's
@@ -343,8 +371,8 @@ export function useTransitionSpec<B extends object, R extends object>({ fraction
         if (!alive || g !== generation) return
         playback.timeline.current = { root: r, animations, duration, read: (t) => setM(held(t)) }
         setSnapshots(captured); setM(first); setReady(true)
-      } catch {
-        if (alive && g === generation) setError(true)
+      } catch (e) {
+        if (alive && g === generation) { if (process.env.NODE_ENV !== 'production') console.error('Spec capture failed:', e); setError(true) }
       }
     }
     void prepare()
@@ -388,7 +416,9 @@ export function SpecPage({ accent, label, name, ready, error, onRetry, drawing, 
       <div ref={stage} className={styles.stage}>
       {/* (the poster's footprint at its scale, so the page lays out round what's drawn) */}
       <div style={{ width: A4.w * k, height: A4.h * k }}>
-      <div className={styles.sheet} data-poster data-hl={hl ?? undefined} style={{ ...accentVars(accent, dark), transform: `scale(${k})`, visibility: ready ? 'visible' : 'hidden' }}>
+      {/* (unshown until ready by opacity, not visibility: a visibility-hidden component can't take focus, and menus
+          move their highlight, and close their submenus, by focus) */}
+      <div className={styles.sheet} data-poster data-hl={hl ?? undefined} style={{ ...accentVars(accent, dark), transform: `scale(${k})`, opacity: ready ? 1 : 0, pointerEvents: ready ? undefined : 'none' }}>
         <header className={styles.title}>
           <h1>{name}</h1>
         </header>

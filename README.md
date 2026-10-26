@@ -22,6 +22,7 @@ It studies the component, agrees the moments with you, then builds the poster as
 
 - `SKILL.md`: the workflow and the poster's rules.
 - `references/drafting.md`: dimension, line-type and view conventions.
+- `references/drivers.md`: driving gestures, pointer paths and libraries that fight a scaled poster.
 - `assets/kit/`: a React and CSS-modules kit for building posters.
 - `assets/example/`: a finished poster of a copy button.
 - `scripts/overlaps.js`: the overlap check.

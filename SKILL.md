@@ -55,12 +55,13 @@ List these and wait for a yes before building:
 ## 3. Freeze the real component
 
 - **Figure 1 is the real component.** Drive it with its own handlers, and freeze it by pausing its real animations: `getAnimations()`, then `pause()` and set `currentTime`, or seek the animation library's own timeline. Never rebuild it, and never run a second animation to imitate it.
-- **Read every number from the running component:** computed style, `getAnimations()`, its timeline, or data attributes it publishes. Never type a duration, an easing or a threshold into the poster.
+- **Read every number from the running component:** computed style, `getAnimations()`, its timeline, or data attributes it publishes. Never type a duration, an easing or a threshold into the poster. Take the first timing function with `firstEasing()`: splitting a computed list on commas cuts `cubic-bezier()` in half.
+- **A component that isn't a CSS transition needs its own driver,** and some fight the poster: anything placed by floating-ui (Radix menus, popovers, tooltips), fixed to the window (toasters, sheets), measuring itself on screen (drag and swipe thresholds), or moving focus. Read [references/drivers.md](references/drivers.md) before building one of these.
 - **Check that channels agree before you show them as one mechanism,** for example that opacity follows the same curve as scale. If they don't, the poster shows its error state rather than a wrong drawing.
 - **Moments are copies:** static DOM snapshots with computed styles inlined, and inert. Use one camera for all of them, so growth never reads as shrinkage.
 - **Report what you measured,** even when it contradicts what the code intends.
 
-**Done when** each moment re-drives the component to the same frame every time, and the held values match the source.
+**Done when** each moment re-drives the component to the same frame every time, the held values match the source, and (for a driven gesture or pointer path) one run has been checked against a real browser mouse or touch.
 
 ## 4. Compose the poster
 
@@ -79,7 +80,7 @@ List these and wait for a yes before building:
   - Each poster takes one iOS 26 system colour (`IOS26` in the kit), unique across the project's posters. Record it in `SPEC_ACCENTS`.
   - Once all twelve are taken, reuse the least-used one.
   - The accent marks lines and fills, with a 12% tint under the run. Words use a darker ink of the same hue (lightness capped at 0.52), so yellow and mint stay readable.
-- **Theme:** use the app's real theme. Pass `theme="dark"` only when the app itself is dark, read through its own mechanism. Never invent a dark theme, and never put a theme toggle on the poster.
+- **Theme:** use the app's real theme. Pass `theme="dark"` only when the app itself is dark, read through its own mechanism. Never invent a dark theme, and never put a theme toggle on the poster. Draw nothing until the theme is known, and key the poster on it so a change redraws it and copies the moments again.
 
 Drafting conventions (dimensions from a datum, line types, detail views, aligned views) are in [references/drafting.md](references/drafting.md). Read it before drawing.
 
@@ -95,11 +96,11 @@ Polish:
 - **Hovering a note** dims every part tagged with another note.
 
 Verify:
-- **Overlaps:** paste `scripts/overlaps.js` into the page and run `btsOverlaps({ overlay: '[data-poster] svg', subject: '[data-poster] figure' })` for every moment at 1280×800, 1000×760 and 1030×1044. It must return nothing. Fix the placement rule, not the one label.
+- **Overlaps:** paste `scripts/overlaps.js` into the page and run `btsOverlaps({ overlay: '[data-poster] svg', subject: '[data-poster] [inert] > *, [data-poster] [data-subject-root]' })` for every moment at 1280×800, 1000×760 and 1030×1044. The subject is the component's own root, not the figure round it, or every label counts as on it. It must return nothing. Fix the placement rule, not the one label.
 - **Fit:** no page scroll at those sizes, and a resize only changes the scale.
 - **Moments:** pick each one. The component, the notes and the curve all follow, and the console stays clean.
 - **One value pinned to the source,** such as the poster's duration against the stylesheet.
-- **Reduced motion:** the poster tells the truth (no moments row if nothing moves).
+- **Reduced motion:** the poster tells the truth (no moments row if nothing moves). Check the claim in the specification with reduced motion on: an app-wide rule can override a library's own transitions.
 - **Hidden tabs:** an embedded or background preview may not run rAF. Check `document.hidden`, and use headless Playwright for screenshots.
 
 **Done when** every check passes. Say which ones you couldn't run.
@@ -132,13 +133,13 @@ Verify:
     - `Callout`;
     - `markClass` (line types and hatches);
     - `useCrisp` (hairlines snapped to device pixels);
-    - `useDrawingScale`.
+    - `useDrawingScale`, and `useScreenScale` for a component that has to sit at screen scale 1.
   - **Figures:**
     - `Curve`;
     - `Timeline`;
     - `Moments` (with `crop`, to show just the part that changes).
   - **Reading:**
-    - `easeAt` and `easeWords`;
+    - `firstEasing`, `easeAt` and `easeWords`;
     - `stopsOf`, `sampleStops` and `scaleOf` (keyframes: a loop uses one cycle);
     - `within` (box measures to 0.1px);
     - `U` and `Ut` (a number with a lighter unit).
@@ -146,10 +147,10 @@ Verify:
   - `useDataState`: drive a component that keeps its state in a data attribute;
   - `startWithout`: put it at its start with no transition;
   - `ms`: parse CSS times.
-- **`sheet-states.tsx`:** snapshot capture and the moments row.
+- **`sheet-states.tsx`:** snapshot capture and the moments row; `oneCamera` (in `spec-kit.tsx`) puts moments captured one at a time in one frame.
 - **`sheet-playback.tsx`:** play, pause and slow playback, for posters that offer it.
 
-For scroll, gestures or a JS animation library, write a small driver with the same shape as `useTransitionSpec` that seeks the library's own clock. Outside React, port the layout and conventions; the kit is a reference, not a dependency.
+For scroll, gestures, pointer paths or a JS animation library, write a small driver with the same shape as `useTransitionSpec` that seeks the library's own clock: see [references/drivers.md](references/drivers.md). Outside React, port the layout and conventions; the kit is a reference, not a dependency.
 
 ## Deliver
 
