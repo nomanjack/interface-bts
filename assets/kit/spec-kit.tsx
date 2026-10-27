@@ -449,7 +449,9 @@ export function useTransitionSpec<B extends object, R extends object>({ fraction
     const frames = new Set<number>()
     const frame = () => new Promise<void>((resolve) => { const id = requestAnimationFrame(() => { frames.delete(id); resolve() }); frames.add(id) })
     const r = root.current!
-    const prepare = async () => {
+    // (tries: a run in which nothing moved is tried once more before the poster shows its error: the component may
+    // have been left at its end state, by a hot reload in development, say, and the second run starts it from rest)
+    const prepare = async (tries = 2): Promise<void> => {
       const g = ++generation
       setReady(false); setError(false)
       try {
@@ -482,7 +484,12 @@ export function useTransitionSpec<B extends object, R extends object>({ fraction
         playback.timeline.current = { root: r, animations, duration, read: (t) => setM(held(t)) }
         setSnapshots(captured); setM(first); setReady(true)
       } catch (e) {
-        if (alive && g === generation) { if (process.env.NODE_ENV !== 'production') console.error('Spec capture failed:', e); setError(true) }
+        if (!alive || g !== generation) return
+        if (tries > 1) { await frame(); if (alive && g === generation) return prepare(tries - 1); return }
+        // (a warning, not an error: the poster says so itself, with its retry, and a development overlay over the
+        // whole page would hide it)
+        if (process.env.NODE_ENV !== 'production') console.warn('Spec capture failed:', e)
+        setError(true)
       }
     }
     void prepare()
