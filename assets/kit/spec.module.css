@@ -28,10 +28,13 @@
 /* Tokens for the poster, light by default; SpecPage's `theme` sets data-theme="dark" when the app is dark */
 .page { --paper: #fff; --surround: oklch(0.975 0 0); --edge: oklch(0 0 0 / 0.06); --dim: oklch(0.5 0 0); --unit: oklch(0.7 0 0); --badge: oklch(0.955 0 0); --grid: oklch(0.25 0 0 / 0.045); --grid-strong: oklch(0.25 0 0 / 0.07); --band: oklch(0.25 0 0 / 0.03); --hatch: oklch(0.25 0 0 / 0.14);
   --divider: repeating-linear-gradient(90deg, var(--faint) 0 3px, transparent 3px 7px); background: var(--surround); color-scheme: light; }
-/* (dark: #121212 paper, ink and lines lifted to keep the same contrast; the components keep their own colours) */
-.page[data-theme='dark'] { --paper: #121212; --surround: oklch(0.13 0 0); --edge: oklch(1 0 0 / 0.08); --ink: oklch(0.93 0 0); --muted: oklch(0.68 0 0); --line: oklch(0.3 0 0); --faint: oklch(0.46 0 0); --dim: oklch(0.72 0 0); --unit: oklch(0.52 0 0); --badge: oklch(0.27 0 0); --grid: oklch(1 0 0 / 0.05); --grid-strong: oklch(1 0 0 / 0.08); --band: oklch(1 0 0 / 0.04); --hatch: oklch(1 0 0 / 0.16); color-scheme: dark; }
+/* (dark: black paper, ink and lines lifted to keep the same contrast; the components keep their own colours) */
+.page[data-theme='dark'] { --paper: #000000; --surround: oklch(0.13 0 0); --edge: oklch(1 0 0 / 0.08); --ink: oklch(0.93 0 0); --muted: oklch(0.68 0 0); --line: oklch(0.3 0 0); --faint: oklch(0.46 0 0); --dim: oklch(0.72 0 0); --unit: oklch(0.52 0 0); --badge: oklch(0.27 0 0); --grid: oklch(1 0 0 / 0.05); --grid-strong: oklch(1 0 0 / 0.08); --band: oklch(1 0 0 / 0.04); --hatch: oklch(1 0 0 / 0.16); color-scheme: dark; }
 /* (the poster sets the page's height, not the page shell's own minimum) */
 .page.page { min-height: 0; }
+/* (in the strip a poster is one of a row: as wide as it's drawn, on the strip's own surround) */
+.page[data-in-strip] { flex: none; background: transparent; }
+.page[data-in-strip] .error { min-height: 0; height: 100%; }
 .stage { display: grid; place-items: center; box-sizing: border-box; padding: 21px; overflow: hidden; }
 .sheet { position: relative; box-sizing: border-box; width: 794px; height: 1123px; transform-origin: 0 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; gap: 21px; padding: 20px 32px; background: var(--paper); box-shadow: 0 0 0 1px var(--edge); font-size: 13px; line-height: 18px; }
 
@@ -122,14 +125,24 @@
 .unit { color: var(--unit); fill: var(--unit); }
 .accentText .unit { fill: var(--accent-ink); fill-opacity: 0.6; }
 
-/* Pointing at a note or a spec row: the parts it's about stay; everything else that's tagged steps back, a little
-   blurred as well as faded, so what's left reads first */
-.sheet [data-part] { transition: opacity 160ms ease-out, filter 160ms ease-out; }
+/* marks drawn in the accent */
 .mark1 { stroke: var(--accent); stroke-width: 1.5; }
 .mark2 { fill: none; stroke: var(--accent); stroke-width: 1.5; }
-.sheet[data-hl] [data-part] { opacity: 0.25; filter: blur(1px); }
-.sheet[data-hl='n1'] [data-part~='n1'], .sheet[data-hl='n2'] [data-part~='n2'], .sheet[data-hl='curve'] [data-part~='curve'] { opacity: 1; filter: none; }
-/* marks that only exist while their note is pointed at */
-.sheet .hlOnly { opacity: 0; transition: opacity 160ms ease-out; }
-.sheet[data-hl='n1'] .show1, .sheet[data-hl='n2'] .show2 { opacity: 1; }
-@media (prefers-reduced-motion: reduce) { .sheet [data-part], .sheet .hlOnly { transition: none; } }
+
+/* Landscape (the strip's toolbar): A4 on its side, 1123 × 794. Figure 1 and its moments take the left, and the foot
+   becomes a column on the right: the notes, figure 2, then the specification, read down, behind a dashed rule. */
+.sheet[data-layout='landscape'] { width: 1123px; height: 794px; grid-template-columns: minmax(0, 1fr) 300px; grid-template-rows: auto minmax(0, 1fr) auto; column-gap: 34px; }
+.sheet[data-layout='landscape'] .title, .sheet[data-layout='landscape'] .titleBlock { grid-column: 1 / -1; }
+.sheet[data-layout='landscape'] .figure { grid-column: 1; grid-row: 2; }
+.sheet[data-layout='landscape'] .foot { grid-column: 2; grid-row: 2; grid-template-columns: minmax(0, 1fr); align-content: start; row-gap: 21px; padding: 0 0 0 21px; margin-left: -1px; background: repeating-linear-gradient(180deg, var(--faint) 0 3px, transparent 3px 7px) top left / 1px 100% no-repeat; }
+.sheet[data-layout='landscape'] .notes, .sheet[data-layout='landscape'] .curveFigure, .sheet[data-layout='landscape'] .spec { grid-area: auto; }
+/* (read down in order: the notes, figure 2, then the specification) */
+.sheet[data-layout='landscape'] .notes { order: 1; }
+.sheet[data-layout='landscape'] .curveFigure { order: 2; }
+.sheet[data-layout='landscape'] .spec { order: 3; }
+/* (one list down the column: both halves' rows share its two columns, so every value starts at the same edge) */
+.sheet[data-layout='landscape'] .spec { grid-template-columns: auto minmax(0, 1fr); gap: 8px 21px; }
+.sheet[data-layout='landscape'] .spec dl { display: contents; }
+
+/* Handwritten (the strip's toolbar): the poster's own words and figures in the hand, the component keeping its own */
+.sheet[data-font='hand'] :is(.title, .foot, .titleBlock, .overlay, .timeline, .curve) { font-family: 'Shantell Sans', 'Comic Sans MS', cursive; letter-spacing: 0; }

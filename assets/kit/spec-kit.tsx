@@ -1,8 +1,9 @@
 'use client'
 
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createContext, type ReactNode, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { captureStates, StateRow, type StateSnapshot } from './sheet-states'
 import { useSheetPlayback } from './sheet-playback'
+import { colourOf, posterColours, PosterStyleContext, type Swatch, SYSTEM } from './poster-style'
 import styles from './spec.module.css'
 
 // The parts every spec sheet shares: the page (title, figure 1, moments, notes, specification, figure 2, foot), the
@@ -11,13 +12,11 @@ import styles from './spec.module.css'
 
 export const r1 = (n: number) => Number(n.toFixed(1))
 
-// The iOS 26 system colours (light). Each spec takes its own: the swatch on lines, fills and marks, a tint of it
-// under the run, and a darker ink of the same hue for words, so even yellow and mint read on white.
-export const IOS26 = {
-  red: '#FF383C', orange: '#FF8D28', yellow: '#FFCC00', green: '#34C759', mint: '#00C8B3', teal: '#00C3D0',
-  cyan: '#00C0E8', blue: '#0088FF', indigo: '#6155F5', purple: '#CB30E0', pink: '#FF2D55', brown: '#AC7F5E',
-} as const
-export type Swatch = keyof typeof IOS26
+// The system colours (SYSTEM in poster-style: macOS and iOS 26, light and dark). Each spec takes its own: the swatch
+// on lines, fills and marks, a tint of it under the run, and a darker ink of the same hue for words, so even yellow
+// and mint read on white; in dark, the dark value of the same swatch.
+export { SYSTEM, type Swatch }
+export const IOS26 = SYSTEM.light
 // Which spec has which swatch. A new spec takes one nobody has; once all twelve are in use, the least-used one.
 // Breaking that (a repeat while a swatch is unused, or one swatch two uses ahead of another) is an error.
 export const SPEC_ACCENTS: Record<string, Swatch> = {
@@ -26,18 +25,34 @@ export const SPEC_ACCENTS: Record<string, Swatch> = {
 }
 if (process.env.NODE_ENV !== 'production') {
   const count = (s: Swatch) => Object.values(SPEC_ACCENTS).filter((v) => v === s).length
-  const counts = (Object.keys(IOS26) as Swatch[]).map(count)
+  const counts = (Object.keys(SYSTEM.light) as Swatch[]).map(count)
   if (Math.max(...counts) - Math.min(...counts) > 1) throw new Error('Accents must stay even: give a new spec the least-used swatch')
 }
-// (the ink is darkened on light paper and lifted on dark, so accent words keep their contrast either way)
-const accentVars = (spec: string, dark: boolean) => {
+// (the ink is darkened on light paper and lifted on dark, so accent words keep their contrast either way; a paper
+// or an accent picked in the strip's toolbar takes over, with every colour worked out from the two in poster-style)
+const accentVars = (spec: string, dark: boolean, paper?: string, accent?: string) => {
   if (!SPEC_ACCENTS[spec]) throw new Error(`Give "${spec}" a swatch in SPEC_ACCENTS: the least-used one`)
-  const c = IOS26[SPEC_ACCENTS[spec]]
+  const c = SYSTEM[dark ? 'dark' : 'light'][SPEC_ACCENTS[spec]]
+  const p = colourOf(paper, dark), a = colourOf(accent, dark)
+  if (p || a) return posterColours(p ?? (dark ? '#000000' : '#ffffff'), a ?? c).vars
   return {
     '--accent': c,
     '--accent-tint': `color-mix(in oklch, ${c} ${dark ? 22 : 12}%, var(--paper))`,
     '--accent-ink': dark ? `oklch(from ${c} max(l, 0.74) c h)` : `oklch(from ${c} min(l, 0.52) c h)`,
   } as React.CSSProperties
+}
+
+// The poster is set in Inter. An app that already loads it under that name is left alone; otherwise it's fetched
+// once from Google Fonts, so a fresh project doesn't fall back to the system's face.
+const INTER = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500&display=swap'
+function useInter() {
+  useEffect(() => {
+    if (document.fonts.check('12px Inter') && [...document.fonts].some((f) => f.family.replace(/["']/g, '') === 'Inter')) return
+    if (document.querySelector(`link[href="${INTER}"]`)) return
+    const link = document.createElement('link')
+    link.rel = 'stylesheet'; link.href = INTER
+    document.head.append(link)
+  }, [])
 }
 
 // The poster follows the app's own theme, passed in: dark only when the app itself is dark. Once the new colours
@@ -55,6 +70,7 @@ function useThemeRefresh(dark: boolean) {
 const KEYWORDS: Record<string, string> = { ease: 'cubic-bezier(0.25, 0.1, 0.25, 1)', 'ease-in': 'cubic-bezier(0.42, 0, 1, 1)', 'ease-out': 'cubic-bezier(0, 0, 0.58, 1)', 'ease-in-out': 'cubic-bezier(0.42, 0, 0.58, 1)' }
 export function easeAt(time: number, easing: string) {
   easing = KEYWORDS[easing.trim()] ?? easing
+  if (easing.trim().startsWith('linear(')) return linearAt(time, easing)
   const values = easing.match(/cubic-bezier\(([^)]+)\)/)?.[1].split(',').map(Number)
   if (!values || values.length !== 4) return time
   const [x1, y1, x2, y2] = values
@@ -67,14 +83,85 @@ export function easeAt(time: number, easing: string) {
   }
   return coordinate((low + high) / 2, y1, y2)
 }
+// CSS linear(): points joined by straight lines, which is how springs reach CSS and the Web Animations API (Motion
+// hands a spring to the browser this way). Each point is a value with up to two positions; a missing position is
+// spread evenly between its neighbours, the first defaulting to 0% and the last to 100%.
+export function linearStops(easing: string) {
+  const body = easing.match(/linear\((.*)\)/)?.[1] ?? ''
+  const pts: { v: number; at: number | null }[] = []
+  for (const part of body.split(',')) {
+    const [v, ...at] = part.trim().split(/\s+/)
+    if (!at.length) pts.push({ v: Number(v), at: null })
+    for (const a of at) pts.push({ v: Number(v), at: parseFloat(a) / 100 })
+  }
+  if (!pts.length) return []
+  if (pts[0].at === null) pts[0].at = 0
+  if (pts[pts.length - 1].at === null) pts[pts.length - 1].at = 1
+  for (let i = 1; i < pts.length; i++) {
+    // (a position never goes back; a run of missing ones shares the gap evenly)
+    if (pts[i].at !== null) { pts[i].at = Math.max(pts[i].at!, pts[i - 1].at!); continue }
+    let j = i; while (pts[j].at === null) j++
+    for (let n = i; n < j; n++) pts[n].at = pts[i - 1].at! + ((pts[j].at! - pts[i - 1].at!) * (n - i + 1)) / (j - i + 1)
+    i = j - 1
+  }
+  return pts as { v: number; at: number }[]
+}
+function linearAt(time: number, easing: string) {
+  const pts = linearStops(easing)
+  if (!pts.length) return time
+  if (time <= pts[0].at) return pts[0].v
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i]
+    if (time <= b.at) return b.at === a.at ? b.v : a.v + ((b.v - a.v) * (time - a.at)) / (b.at - a.at)
+  }
+  return pts[pts.length - 1].v
+}
+
+// A spring's progress (0 at the start, 1 at rest) `ms` after release, from its physics: stiffness, damping and mass,
+// and its starting velocity in progress a second. Use it only when the spring's own function can't be read from the
+// running animation (see references/drivers.md), and say on the poster that the curve is derived from the config.
+export type Spring = { stiffness: number; damping: number; mass?: number; velocity?: number }
+export function springAt(ms: number, { stiffness: k, damping: c, mass = 1, velocity: v0 = 0 }: Spring) {
+  const t = ms / 1000, w0 = Math.sqrt(k / mass), z = c / (2 * Math.sqrt(k * mass))
+  let d: number
+  if (z < 1) { const wd = w0 * Math.sqrt(1 - z * z); d = Math.exp(-z * w0 * t) * (Math.cos(wd * t) + ((z * w0 - v0) / wd) * Math.sin(wd * t)) }
+  else if (z === 1) d = Math.exp(-w0 * t) * (1 + (w0 - v0) * t)
+  else { const q = w0 * Math.sqrt(z * z - 1), r1 = -z * w0 + q, r2 = -z * w0 - q, a = (-v0 - r2) / (r1 - r2); d = a * Math.exp(r1 * t) + (1 - a) * Math.exp(r2 * t) }
+  return 1 - d
+}
+// When a curve (progress over ms) comes to rest: the last moment it's further than `delta` from 1, scanning back
+// from `max`. A spring has no duration of its own; this is the one the poster states, with the delta it used.
+export function settleTime(f: (ms: number) => number, max = 10000, delta = 0.005) {
+  for (let ms = max; ms >= 0; ms -= 1) if (Math.abs(1 - f(ms)) > delta) return ms + 1
+  return 0
+}
+// The furthest a curve goes past 1 (0 when it never does): a spring's overshoot, as a fraction of the move
+export function overshoot(f: (ms: number) => number, max: number) {
+  let top = 1
+  for (let i = 0; i <= 400; i++) top = Math.max(top, f((max * i) / 400))
+  return top - 1
+}
+
 // The first timing function in a computed list ("cubic-bezier(0.22, 1, 0.36, 1), ease"). Splitting on commas cuts a
 // cubic-bezier() in half and every curve drawn from it comes out wrong.
 export const firstEasing = (v: string) => v.match(/cubic-bezier\([^)]*\)|steps\([^)]*\)|linear\([^)]*\)|[a-z-]+/)?.[0] ?? 'ease'
 
+// An easing in words, named by its shape, not assumed: a curve that starts slower than a straight line eases in, one
+// that ends slower eases out, one that does both eases in and out. A linear() (a spring handed to CSS) and steps()
+// are named for what they are.
 export const easeWords = (easing: string) => {
-  if (KEYWORDS[easing.trim()]) return `${easing.trim()[0].toUpperCase()}${easing.trim().slice(1)} (${KEYWORDS[easing.trim()].match(/\(([^)]+)\)/)![1]})`
-  const v = easing.match(/\(([^)]+)\)/)?.[1].split(',').map(Number).join(', ')
-  return v ? `Ease-out (${v})` : easing
+  const e = easing.trim()
+  if (e === 'linear') return 'Linear'
+  if (e.startsWith('linear(')) return `Linear stops (${linearStops(e).length} points, a spring or a custom curve)`
+  if (e.startsWith('steps(')) return `Steps (${e.match(/\(([^)]+)\)/)?.[1]})`
+  const curve = KEYWORDS[e] ?? e
+  const v = curve.match(/cubic-bezier\(([^)]+)\)/)?.[1].split(',').map(Number)
+  if (!v || v.length !== 4) return easing
+  const [x1, y1, x2, y2] = v
+  // (the curve's slope where it leaves 0 and where it reaches 1: under 1 is slower than linear)
+  const slowStart = x1 > 0 && y1 / x1 < 1, slowEnd = x2 < 1 && (1 - y2) / (1 - x2) < 1
+  const shape = slowStart && slowEnd ? 'Ease-in-out' : slowEnd ? 'Ease-out' : slowStart ? 'Ease-in' : 'Linear-ish'
+  return `${KEYWORDS[e] ? `${e[0].toUpperCase()}${e.slice(1)}` : shape} (${v.join(', ')})`
 }
 
 // A keyframed animation's own stops (offset, value, the easing into the next), read off the running animation, and
@@ -127,16 +214,25 @@ export function oneCamera(shots: StateSnapshot[]): StateSnapshot[] {
 }
 
 // The poster's scale: A4 portrait (794 × 1123), as large as the space allows: the stage's width, and the window's
-// height below wherever the stage starts (under the app's own header or nav, whatever its height)
+// height below wherever the stage starts (under the app's own header or nav, whatever its height). In the strip
+// (spec-strip.tsx) a poster isn't held to a width, only to the window's, less a peek of the next one.
 export const A4 = { w: 794, h: 1123 }
-function usePosterScale(stage: React.RefObject<HTMLElement | null>) {
+// (turned on its side when the toolbar asks for landscape)
+const sheetSize = (layout: 'portrait' | 'landscape') => (layout === 'landscape' ? { w: A4.h, h: A4.w } : A4)
+export const InStrip = createContext(false)
+function usePosterScale(stage: React.RefObject<HTMLElement | null>, strip: boolean, size: { w: number; h: number }) {
   const [k, setK] = useState(0.6)
   useLayoutEffect(() => {
     const el = stage.current
     if (!el) return
     const fit = () => {
-      const top = el.getBoundingClientRect().top + window.scrollY
-      setK(Math.max(0.1, Math.min((el.clientWidth - 42) / A4.w, (window.innerHeight - top - 42) / A4.h)))
+      // (in the strip, the row's own height less its padding, the toolbar's room: the poster is centred in it, so
+      // its own top follows its scale)
+      const row = strip ? el.closest<HTMLElement>('[data-spec-strip]') : null
+      const pad = row ? parseFloat(getComputedStyle(row).paddingTop) + parseFloat(getComputedStyle(row).paddingBottom) : 0
+      const tall = row ? row.clientHeight - pad - 42 : window.innerHeight - (el.getBoundingClientRect().top + window.scrollY) - 42
+      const wide = strip ? window.innerWidth - 42 - 55 : el.clientWidth - 42
+      setK(Math.max(0.1, Math.min(wide / size.w, tall / size.h)))
     }
     fit()
     // (the stage's width, and anything above it changing height, both refit it)
@@ -144,7 +240,7 @@ function usePosterScale(stage: React.RefObject<HTMLElement | null>) {
     ro.observe(el); ro.observe(document.body)
     window.addEventListener('resize', fit)
     return () => { window.removeEventListener('resize', fit); ro.disconnect() }
-  }, [stage])
+  }, [stage, strip, size.w, size.h])
   return k
 }
 
@@ -213,7 +309,7 @@ export type Dir = 'ne' | 'se' | 'sw' | 'nw' | 'e' | 'w'
 export function Callout({ n, x, y, dir, len = 34 }: { n: number; x: number; y: number; dir: Dir; len?: number }) {
   const tx = x + (dir.includes('e') ? len : -len), ty = y + (dir.length === 1 ? 0 : dir.includes('s') ? len : -len)
   return <g className={styles.callout} data-part={`n${n}`}>
-    <line x1={x} y1={y} x2={tx} y2={ty} />
+    <line x1={x} y1={y} x2={tx} y2={ty} data-bts-leader />
     <circle cx={x} cy={y} r={2.25} className={styles.point} />
     <path d={squircle(tx, ty, 10.5)} className={styles.badge} />
     <text x={tx} y={ty + 3.5} textAnchor="middle">{n}</text>
@@ -222,9 +318,9 @@ export function Callout({ n, x, y, dir, len = 34 }: { n: number; x: number; y: n
 
 // The overlay that sits on figure 1: same origin and scale as the component under it.
 export function Overlay({ w, h, children, svgRef }: { w: number; h: number; children: ReactNode; svgRef?: React.Ref<SVGSVGElement> }) {
-  return <svg ref={svgRef} className={styles.overlay} width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true">{children}</svg>
+  return <svg ref={svgRef} className={styles.overlay} width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true" data-bts-overlay>{children}</svg>
 }
-export const markClass = { ghost: styles.ghost, reference: styles.reference, mark: styles.mark2, underline: styles.mark1, hlOnly: styles.hlOnly, show1: styles.show1, show2: styles.show2, hatch: styles.hatch }
+export const markClass = { ghost: styles.ghost, reference: styles.reference, mark: styles.mark2, underline: styles.mark1, hatch: styles.hatch }
 
 // Figure 2: one or more curves over x (time, or scroll), the first one carrying the current point and its value.
 export type Series = { f: (x: number) => number; className?: string }
@@ -237,25 +333,36 @@ export function Curve({ x, max, series, end, unit = '', label, marks = [] }: { x
     if (w && Math.abs(w - cw) > 0.5) setCw(w)
   })
   const L = 21, T = 8, W = cw - L - 8, H = 117
-  const X = (v: number) => L + (W * v) / max, Y = (k: number) => T + H * (1 - k)
+  // (the range reaches past 0 and 1 when a curve does, a spring's overshoot say, so nothing is cut off at the edge)
+  let lo = 0, hi = 1
+  for (const s of series) for (let i = 0; i <= 80; i++) { const v = s.f((max * i) / 80); lo = Math.min(lo, v); hi = Math.max(hi, v) }
+  const X = (v: number) => L + (W * v) / max, Y = (k: number) => T + (H * (hi - k)) / (hi - lo)
   const path = (f: (v: number) => number) => Array.from({ length: 81 }, (_, i) => `${i ? 'L' : 'M'}${X((max * i) / 80)} ${Y(f((max * i) / 80))}`).join('')
   const k = series[0].f(x)
-  // (high on a lone curve, the value goes above and left of the point; with a second series up there, it stays below)
-  const high = k > 0.8 && series.length === 1
+  // (high on a lone curve, the value goes above and left of the point; with a second series up there, it stays below,
+  // unless the point is past 1, where below would sit on the rest line)
+  const high = (k > 0.8 && series.length === 1) || k > 1
   const cx = X(x), cy = Y(k)
   return (
     <svg ref={svg} className={styles.curve} viewBox={`0 0 ${L + W + 8} ${T + H + 21}`} role="img" aria-label={`${r1(x)} of ${max}${unit}, ${Math.round(k * 100)} percent.`}>
-      <path d={`M${L} ${T}V${T + H}H${L + W}`} className={styles.axis} />
-      <line x1={L} y1={T + H} x2={L + W} y2={T} className={styles.referenceLine} />
+      <path d={`M${L} ${T}V${T + H}M${L} ${Y(0)}H${L + W}`} className={styles.axis} />
+      <line x1={L} y1={Y(0)} x2={L + W} y2={Y(1)} className={styles.referenceLine} />
+      {/* (where it comes to rest, when the curve goes past it) */}
+      {hi > 1 && <line x1={L} y1={Y(1)} x2={L + W} y2={Y(1)} className={styles.guide} />}
       {series.slice(1).map((s, i) => <path key={i} d={path(s.f)} className={s.className ?? styles.ease} />)}
       <path d={path(series[0].f)} className={series[0].className ?? styles.ease} />
       {marks.map((v) => <circle key={v} cx={X(v)} cy={Y(series[0].f(v))} r={2.5} className={styles.mark} />)}
-      <path d={`M${L} ${cy}H${cx}V${T + H}`} className={styles.guide} />
+      <path d={`M${L} ${cy}H${cx}V${Y(0)}`} className={styles.guide} />
       <circle cx={cx} cy={cy} r={3.5} className={styles.dot} />
-      <text x={L - 8} y={T + 4} textAnchor="end">1</text>
-      <text x={L - 8} y={T + H + 4} textAnchor="end">0</text>
-      <text x={high ? cx - 8 : cx + 8} y={high ? cy - 8 : cy + 15} textAnchor={high ? 'end' : 'start'} className={styles.accentText}>{label ?? <Ut v={Math.round(k * 100)} u="%" />}</text>
-      <text x={cx} y={T + H + 17} textAnchor="middle" className={styles.accentText}>{r1(x)}</text>
+      <text x={L - 8} y={Y(1) + 4} textAnchor="end">1</text>
+      <text x={L - 8} y={Y(0) + 4} textAnchor="end">0</text>
+      {/* (on the side of the point away from the reference diagonal: above and to the left when the point is above it,
+          as an ease-out's is, where the curve behind it runs lower; below and to the right when it's under it. Above
+          and to the left too when the point is high or near the curve's end, where the right would be off the sheet,
+          unless that's the axis's own labels: then to its right) */}
+      {(() => { const end = cx > L + W - 55, ahead = k > x / max + 0.02, above = high || end || ahead, left = (above && cx > L + 55) || end; return <text x={left ? cx - 8 : cx + 8} y={above ? cy - 8 : cy + 15} textAnchor={left ? 'end' : 'start'} className={styles.accentText}>{label ?? <Ut v={Math.round(k * 100)} u="%" />}</text> })()}
+      {/* (the time under the point, kept inside the axis at either end) */}
+      <text x={cx} y={T + H + 17} textAnchor={cx > L + W - 21 ? 'end' : cx < L + 21 ? 'start' : 'middle'} className={styles.accentText}>{r1(x)}</text>
       {Math.abs(cx - (L + W)) > 55 && <text x={L + W} y={T + H + 17} textAnchor="end">{end}</text>}
     </svg>
   )
@@ -321,8 +428,10 @@ export const within = (root: HTMLElement, el: Element) => {
 }
 export function useTransitionSpec<B extends object, R extends object>({ fractions, setup }: {
   fractions: readonly number[]
-  // (setup may wait, and base may be read after the trigger, for a component whose parts only exist once it's shown)
-  setup: (root: HTMLElement) => Setup<B, R> | Promise<Setup<B, R>>
+  // (setup may wait, and base may be read after the trigger, for a component whose parts only exist once it's shown.
+  // `stale()` turns true once this run has been replaced or the poster has gone, React's development double-run
+  // included: a setup that waits before it acts checks it first, or it toggles the component twice)
+  setup: (root: HTMLElement, run: { stale: () => boolean }) => Setup<B, R> | Promise<Setup<B, R>>
 }) {
   const root = useRef<HTMLDivElement>(null)
   const [m, setM] = useState<Held<B, R> | null>(null)
@@ -348,7 +457,7 @@ export function useTransitionSpec<B extends object, R extends object>({ fraction
         await frame()
         if (!alive || g !== generation) return
         r.getAnimations({ subtree: true }).forEach((a) => a.cancel())
-        const s = await keep.current(r)
+        const s = await keep.current(r, { stale: () => !alive || g !== generation })
         if (!alive || g !== generation) return
         void getComputedStyle(r).opacity
         const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -357,7 +466,8 @@ export function useTransitionSpec<B extends object, R extends object>({ fraction
         void getComputedStyle(r).opacity
         const base = typeof s.base === 'function' ? (s.base as () => B)() : s.base
         const all = r.getAnimations({ subtree: true })
-        const animations = s.pick ? s.pick(all) : all
+        // (nothing to pick from under reduced motion, when nothing ran)
+        const animations = s.pick && all.length ? s.pick(all) : all
         if (!reduced && !animations.length) throw new Error('No transitions ran')
         // (a looping animation's end is infinite: its one cycle is the run)
         const end = (a: Animation) => { const t = a.effect!.getComputedTiming(); return Number.isFinite(Number(t.endTime)) ? Number(t.endTime) : Number(t.delay ?? 0) + Number(t.duration) }
@@ -394,41 +504,51 @@ export function useTransitionSpec<B extends object, R extends object>({ fraction
   return { root, m, ready, error, retry: () => setAttempt((v) => v + 1), snapshots, selected, select, glideTo: playback.glideTo }
 }
 
-export type Note = { part: 'n1' | 'n2'; head: string; body: ReactNode }
+// (a note per callout: two to four)
+export type Note = { part: 'n1' | 'n2' | 'n3' | 'n4'; head: string; body: ReactNode }
 export type Row = readonly [string, ReactNode, string]
 
-// The page. `hl` (what's pointed at in the notes or the specification) dims everything tagged with another part.
-export function SpecPage({ accent, label, name, ready, error, onRetry, drawing, moments, notes, spec, fig2, units, theme = 'light' }: {
-  theme?: 'light' | 'dark'
-  accent: string; label: string; name: string; ready: boolean; error: boolean; onRetry: () => void
+// (`settled`: for a driver that has to show its poster before it's done, a menu or a drag that needs focus while it
+// captures, false until it has finished; the page of all posters waits for it before showing the poster)
+// (`lines`: the line types the title block explains, only those the drawing uses)
+export function SpecPage({ accent, label, name, ready, settled, error, onRetry, drawing, moments, notes, spec, fig2, units, theme = 'light', lines = ['now', 'start', 'target'] }: {
+  theme?: 'light' | 'dark'; lines?: readonly ('now' | 'start' | 'target')[]
+  accent: string; label: string; name: string; ready: boolean; settled?: boolean; error: boolean; onRetry: () => void
   drawing: ReactNode; moments?: ReactNode; notes: Note[]; spec: readonly Row[]
   fig2?: { node: ReactNode }; units: ReactNode
 }) {
-  const [hl, setHl] = useState<string | null>(null)
-  const point = (part: string) => ({ 'data-part': part, onMouseEnter: () => setHl(part === 'none' ? null : part), onMouseLeave: () => setHl(null) })
+  // (each note, row and figure 2 says which parts it's about, for whoever reads the poster's markup; nothing
+  // reacts to the pointer: a poster reads the same whether or not it's hovered)
+  const point = (part: string) => ({ 'data-part': part })
   const stage = useRef<HTMLDivElement>(null)
-  const k = usePosterScale(stage)
+  const strip = useContext(InStrip)
+  const look = useContext(PosterStyleContext)
+  const size = sheetSize(look.layout)
+  const k = usePosterScale(stage, strip, size)
   const dark = theme === 'dark'
   useThemeRefresh(dark)
+  useInter()
+  // (one poster on its own is the page's main content; in the strip, the strip is, and each poster an article in it)
+  const Root = strip ? 'article' : 'main'
   return (
-    <main className={styles.page} data-theme={theme} data-interface-bts aria-label={label} aria-busy={!ready && !error}>
+    <Root className={styles.page} data-theme={theme} data-interface-bts data-in-strip={strip || undefined} data-settled={((settled ?? ready) && !error) || undefined} aria-label={label} aria-busy={!ready && !error}>
       {error && <div className={styles.error} role="alert"><p>The breakdown couldn&apos;t load.</p><button onClick={onRetry}>Try again</button></div>}
       <div ref={stage} className={styles.stage}>
       {/* (the poster's footprint at its scale, so the page lays out round what's drawn) */}
-      <div style={{ width: A4.w * k, height: A4.h * k }}>
+      <div style={{ width: size.w * k, height: size.h * k }}>
       {/* (unshown until ready by opacity, not visibility: a visibility-hidden component can't take focus, and menus
           move their highlight, and close their submenus, by focus) */}
-      <div className={styles.sheet} data-poster data-hl={hl ?? undefined} style={{ ...accentVars(accent, dark), transform: `scale(${k})`, opacity: ready ? 1 : 0, pointerEvents: ready ? undefined : 'none' }}>
+      <div className={styles.sheet} data-poster data-layout={look.layout} data-font={look.font} style={{ ...accentVars(accent, dark, look.paper, look.accent), transform: `scale(${k})`, opacity: ready ? 1 : 0, pointerEvents: ready ? undefined : 'none' }}>
         <header className={styles.title}>
           <h1>{name}</h1>
         </header>
 
         <figure className={styles.figure}>
-          <div className={styles.drawing}>{drawing}</div>
+          <div className={styles.drawing} data-drawing>{drawing}</div>
           {moments}
         </figure>
 
-        <div className={styles.foot}>
+        <div className={styles.foot} data-foot>
           <section className={styles.notes} aria-label="Notes">
             {notes.map((n, i) => <div key={i} className={styles.note} {...point(n.part)}><span className={styles.number}>{i + 1}</span><p><span>{n.head}</span> {n.body}</p></div>)}
           </section>
@@ -440,13 +560,17 @@ export function SpecPage({ accent, label, name, ready, error, onRetry, drawing, 
           </figure>}
         </div>
 
-        <footer className={styles.titleBlock} aria-label="Drawing details">
+        <footer className={styles.titleBlock} aria-label="Drawing details" data-title-block>
           <span>{units}</span>
-          <span className={styles.lines}><i className={styles.lineNow} />Now<i className={styles.lineGhost} />Start<i className={styles.lineRef} />Target</span>
+          {lines.length > 0 && <span className={styles.lines}>
+            {lines.includes('now') && <><i className={styles.lineNow} />Now</>}
+            {lines.includes('start') && <><i className={styles.lineGhost} />Start</>}
+            {lines.includes('target') && <><i className={styles.lineRef} />Target</>}
+          </span>}
         </footer>
       </div>
       </div>
       </div>
-    </main>
+    </Root>
   )
 }

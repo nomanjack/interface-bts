@@ -3,7 +3,7 @@
 import { useRef } from 'react'
 import { SourceCopy } from './source-copy'
 import { type SetController, startWithout } from '../kit/source-kit'
-import { Callout, Curve, Dim, easeAt, easeWords, type Held, markClass, Moments, Overlay, r1, SpecPage, Timeline, U, useCrisp, useDrawingScale, useTransitionSpec, Ut } from '../kit/spec-kit'
+import { Callout, Curve, Dim, easeAt, easeWords, firstEasing, type Held, markClass, Moments, Overlay, r1, SpecPage, Timeline, U, useCrisp, useDrawingScale, useTransitionSpec, Ut, within } from '../kit/spec-kit'
 import styles from '../kit/spec.module.css'
 
 // The copy button, held 40ms into its swap: the copy icon half gone and soft, the check half arrived.
@@ -22,8 +22,6 @@ function Drawing({ m, z: Z }: { m: Held<Base, Read>; z: number }) {
     <Overlay w={S} h={S} svgRef={ref}>
       {/* the one spot both icons share, and the button round it */}
       {box(markClass.reference, 'n1 n2')}
-      <rect x={0.5} y={0.5} width={S - 1} height={S - 1} rx={m.radius * Z} className={`${markClass.mark} ${markClass.hlOnly} ${markClass.show1}`} />
-      {box(`${markClass.mark} ${markClass.hlOnly} ${markClass.show2}`)}
       <Dim snap={snap} x1={0} x2={S} y={S + 21} from={S} label={m.size} below part="none" />
       <Dim snap={snap} x1={o} x2={o + i} y={-21} from={o} label={m.icon} part="n1" />
       <Callout n={1} x={o} y={o + i * 0.3} dir="w" len={o + 34} />
@@ -43,8 +41,8 @@ export function CopySpecSheet() {
       startWithout([out, inn], () => controller.current!.set(false))
       const c = getComputedStyle(inn)
       return {
-        base: { size: src.offsetWidth, icon: 16, radius: parseFloat(getComputedStyle(src).borderTopLeftRadius), blur: blurOf(c.filter), scale: new DOMMatrixReadOnly(c.transform).a },
-        easing: getComputedStyle(out).transitionTimingFunction.split(',')[0].match(/cubic-bezier\([^)]+\)/)?.[0] ?? c.transitionTimingFunction.match(/cubic-bezier\([^)]+\)/)?.[0] ?? 'ease',
+        base: { size: src.offsetWidth, icon: within(root, out).w, radius: parseFloat(getComputedStyle(src).borderTopLeftRadius), blur: blurOf(c.filter), scale: new DOMMatrixReadOnly(c.transform).a },
+        easing: firstEasing(getComputedStyle(out).transitionTimingFunction),
         trigger: () => controller.current!.set(true),
         read: () => {
           const a = getComputedStyle(out), b = getComputedStyle(inn)
@@ -66,10 +64,11 @@ export function CopySpecSheet() {
       </>}
       moments={m && !m.reduced && <Moments snapshots={drv.snapshots} labels={['Copy', 'Swapping', 'Copied']} selected={drv.selected} onSelect={drv.select}
         timeline={<Timeline value={m.elapsed} max={m.duration} f={ease} marks={FRACTIONS.map((f) => f * m.duration)} selected={drv.selected} label={<Ut v={m.elapsed} u="ms" />} />} />}
-      notes={[
-        { part: 'n1', head: 'The old icon dissolves.', body: <>It fades out while blurring to {m?.blur ?? 4}px and shrinking to {m ? Math.round(m.scale * 100) : 80}%, so it goes soft rather than popping off. Now: {m ? Math.round(m.outO * 100) : 0}% there, {m ? r1(m.outB) : 0}px blur.</> },
+      // (every number in the notes is a held value: nothing is typed in, and nothing shows until it's been read)
+      notes={m ? [
+        { part: 'n1', head: 'The old icon dissolves.', body: <>It fades out while blurring to {m.blur}px and shrinking to {Math.round(m.scale * 100)}%, so it goes soft rather than popping off. Now: {Math.round(m.outO * 100)}% there, {r1(m.outB)}px blur.</> },
         { part: 'n2', head: 'The new one arrives sharp.', body: 'The check does the reverse on the same clock, in the same spot. They cross in the middle, so the button is never empty.' },
-      ]}
+      ] : []}
       spec={m ? [
         ['Trigger', 'Click', 'none'],
         ['Animates', 'opacity, blur, scale', 'n1'],
